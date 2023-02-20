@@ -92,6 +92,10 @@ celerybeat-schedule
 venv/
 ENV/
 
+# poetry environ
+pyproject.toml
+poetry.lock
+
 # Spyder project settings
 .spyderproject
 .spyproject
