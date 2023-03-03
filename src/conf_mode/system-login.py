@@ -16,22 +16,21 @@
 
 import os
 
-from crypt import crypt
-from crypt import METHOD_SHA512
+from passlib.hosts import linux_context
 from psutil import users
 from pwd import getpwall
 from pwd import getpwnam
-from spwd import getspnam
 from sys import exit
 from time import sleep
 
 from vyos.config import Config
 from vyos.configdict import dict_merge
 from vyos.configverify import verify_vrf
+from vyos.defaults import directories
 from vyos.template import render
 from vyos.template import is_ipv4
 from vyos.util import cmd
-from vyos.util import call
+from vyos.util import call, rc_cmd
 from vyos.util import run
 from vyos.util import DEVNULL
 from vyos.util import dict_search
@@ -42,6 +41,11 @@ airbag.enable()
 
 autologout_file = "/etc/profile.d/autologout.sh"
 radius_config_file = "/etc/pam_radius_auth.conf"
+
+# LOGIN_TIMEOUT from /etc/loign.defs minus 10 sec
+MAX_RADIUS_TIMEOUT: int = 50
+# MAX_RADIUS_TIMEOUT divided by 2 sec (minimum recomended timeout)
+MAX_RADIUS_COUNT: int = 25
 
 def get_local_users():
     """Return list of dynamically allocated users (see Debian Policy Manual)"""
@@ -54,6 +58,13 @@ def get_local_users():
 
     return local_users
 
+def get_shadow_password(username):
+    with open('/etc/shadow') as f:
+        for user in f.readlines():
+            items = user.split(":")
+            if username == items[0]:
+                return items[1]
+    return None
 
 def get_config(config=None):
     if config:
@@ -118,17 +129,26 @@ def verify(login):
     if 'radius' in login:
         if 'server' not in login['radius']:
             raise ConfigError('No RADIUS server defined!')
-
+        sum_timeout: int = 0
+        radius_servers_count: int = 0
         fail = True
         for server, server_config in dict_search('radius.server', login).items():
             if 'key' not in server_config:
                 raise ConfigError(f'RADIUS server "{server}" requires key!')
-
-            if 'disabled' not in server_config:
+            if 'disable' not in server_config:
+                sum_timeout += int(server_config['timeout'])
+                radius_servers_count += 1
                 fail = False
-                continue
+
         if fail:
             raise ConfigError('All RADIUS servers are disabled')
+
+        if radius_servers_count > MAX_RADIUS_COUNT:
+            raise ConfigError('Number of RADIUS servers more than 25 ')
+
+        if sum_timeout > MAX_RADIUS_TIMEOUT:
+            raise ConfigError('Sum of RADIUS servers timeouts '
+                              'has to be less or eq 50 sec')
 
         verify_vrf(login['radius'])
 
@@ -153,13 +173,13 @@ def generate(login):
         for user, user_config in login['user'].items():
             tmp = dict_search('authentication.plaintext_password', user_config)
             if tmp:
-                encrypted_password = crypt(tmp, METHOD_SHA512)
+                encrypted_password = linux_context.hash(tmp)
                 login['user'][user]['authentication']['encrypted_password'] = encrypted_password
                 del login['user'][user]['authentication']['plaintext_password']
 
                 # remove old plaintext password and set new encrypted password
                 env = os.environ.copy()
-                env['vyos_libexec_dir'] = '/usr/libexec/vyos'
+                env['vyos_libexec_dir'] = directories['base']
 
                 # Set default commands for re-adding user with encrypted password
                 del_user_plain = f"system login user '{user}' authentication plaintext-password"
@@ -183,10 +203,12 @@ def generate(login):
                     add_user_encrypt = " ".join(add_user_encrypt)
 
                 call(f"/opt/vyatta/sbin/my_delete {del_user_plain}", env=env)
-                call(f"/opt/vyatta/sbin/my_set {add_user_encrypt}", env=env)
+                ret, out = rc_cmd(f"/opt/vyatta/sbin/my_set {add_user_encrypt}", env=env)
+                if ret:
+                    raise ConfigError(out)
             else:
                 try:
-                    if getspnam(user).sp_pwdp == dict_search('authentication.encrypted_password', user_config):
+                    if get_shadow_password(user) == dict_search('authentication.encrypted_password', user_config):
                         # If the current encrypted bassword matches the encrypted password
                         # from the config - do not update it. This will remove the encrypted
                         # value from the system logs.

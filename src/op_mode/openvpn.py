@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# Copyright (C) 2022 VyOS maintainers and contributors
+# Copyright (C) 2022-2023 VyOS maintainers and contributors
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License version 2 or later as
@@ -153,6 +153,8 @@ def _get_raw_data(mode: str) -> dict:
         d = data[intf]
         d['local_host'] = conf_dict[intf].get('local-host', '')
         d['local_port'] = conf_dict[intf].get('local-port', '')
+        if conf.exists(f'interfaces openvpn {intf} server client'):
+            d['configured_clients'] = conf.list_nodes(f'interfaces openvpn {intf} server client')
         if mode in ['client', 'site-to-site']:
             for client in d['clients']:
                 if 'shared-secret-key-file' in list(conf_dict[intf]):
@@ -171,8 +173,8 @@ def _format_openvpn(data: dict) -> str:
                'TX bytes', 'RX bytes', 'Connected Since']
 
     out = ''
-    data_out = []
     for intf in list(data):
+        data_out = []
         l_host = data[intf]['local_host']
         l_port = data[intf]['local_port']
         for client in list(data[intf]['clients']):
@@ -190,7 +192,9 @@ def _format_openvpn(data: dict) -> str:
             data_out.append([name, remote, tunnel, local, tx_bytes,
                              rx_bytes, online_since])
 
-        out += tabulate(data_out, headers)
+        if data_out:
+            out += tabulate(data_out, headers)
+            out += "\n"
 
     return out
 
